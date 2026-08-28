@@ -1,0 +1,135 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Product extends Model
+{
+    protected $fillable = [
+        'category_id',
+        'brand_id',
+        'name',
+        'slug',
+        'main_image',
+        'short_description',
+        'description',
+        'price',
+        'old_price',
+        'stock',
+        'sku',
+        'rating',
+        'reviews_count',
+        'is_featured',
+        'is_flash_sale',
+        'is_popular',
+        'is_best_seller',
+        'is_new_arrival',
+        'top_selling',
+        'sort_order',
+        'is_active',
+        'attributes',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'price' => 'decimal:2',
+            'old_price' => 'decimal:2',
+            'rating' => 'decimal:1',
+            'is_featured' => 'boolean',
+            'is_flash_sale' => 'boolean',
+            'is_popular' => 'boolean',
+            'is_best_seller' => 'boolean',
+            'is_new_arrival' => 'boolean',
+            'top_selling' => 'boolean',
+            'is_active' => 'boolean',
+            'attributes' => 'array',
+        ];
+    }
+
+    public function category()
+    {
+        return $this->belongsTo(Category::class);
+    }
+
+    public function brand()
+    {
+        return $this->belongsTo(Brand::class);
+    }
+
+    public function images()
+    {
+        return $this->hasMany(ProductImage::class)->orderBy('sort_order');
+    }
+
+    public function orderItems()
+    {
+        return $this->hasMany(OrderItem::class);
+    }
+
+    public function reviews()
+    {
+        return $this->hasMany(ProductReview::class)->latest();
+    }
+
+    public function approvedReviews()
+    {
+        return $this->hasMany(ProductReview::class)->where('status', 'approved')->latest();
+    }
+
+    public function getMainImageAttribute($value)
+    {
+        return $value ?? $this->images->first()?->path;
+    }
+
+    public function getDiscountPercentAttribute(): ?int
+    {
+        if (! $this->old_price || $this->old_price <= $this->price) {
+            return null;
+        }
+
+        return (int) round((($this->old_price - $this->price) / $this->old_price) * 100);
+    }
+
+    /** Units sold so far — shown as "X sold" on the product card. */
+    public function getSoldCountAttribute(): int
+    {
+        return (int) $this->orderItems()->sum('quantity');
+    }
+
+    public function scopeActive($query)
+    {
+        return $query->where('is_active', true);
+    }
+
+    public function scopeFeatured($query)
+    {
+        return $query->where('is_featured', true);
+    }
+
+    public function scopeFlashSale($query)
+    {
+        return $query->where('is_flash_sale', true);
+    }
+
+    public function scopePopular($query)
+    {
+        return $query->where('is_popular', true);
+    }
+
+    public function scopeBestSeller($query)
+    {
+        return $query->where('is_best_seller', true);
+    }
+
+    public function scopeNewArrival($query)
+    {
+        return $query->where('is_new_arrival', true);
+    }
+
+    public function scopeTopSelling($query)
+    {
+        return $query->where('top_selling', true);
+    }
+}
