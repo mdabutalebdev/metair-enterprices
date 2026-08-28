@@ -1,0 +1,449 @@
+@php
+    $editing = $product->exists;
+    // Variant groups for the editor: prefer old() input on validation failure,
+    // otherwise the product's saved attributes. Kept as a real PHP array so it can be
+    // handed to Alpine via Js::from() below (no manual/double JSON encoding).
+    $variantData = old('attributes') ? json_decode(old('attributes'), true) : ($product->attributes ?? []);
+    if (! is_array($variantData)) {
+        $variantData = [];
+    }
+
+    // Upload guards must mirror what this server actually accepts. A post bigger than
+    // post_max_size is rejected with a bare 413 before PHP runs, so Laravel's own
+    // validation never fires and the whole form is lost. Reading the live ini values
+    // keeps the on-screen limits correct if the host limits are raised later.
+    $iniBytes = static function (string $key): int {
+        $raw = trim((string) ini_get($key));
+        if ($raw === '') {
+            return 0;
+        }
+
+        return (int) match (strtolower(substr($raw, -1))) {
+            'g' => (float) $raw * 1024 ** 3,
+            'm' => (float) $raw * 1024 ** 2,
+            'k' => (float) $raw * 1024,
+            default => (float) $raw,
+        };
+    };
+
+    $postMax = $iniBytes('post_max_size') ?: 8 * 1024 ** 2;
+    $uploadMax = $iniBytes('upload_max_filesize') ?: $postMax;
+
+    // ~10% headroom for the text fields, description HTML and multipart overhead.
+    $totalLimitMb = max(1, (int) floor($postMax * 0.9 / 1024 ** 2));
+    $mainLimitMb = max(1, min(10, (int) floor($uploadMax / 1024 ** 2), $totalLimitMb));
+    $galleryLimitMb = max(1, min(20, (int) floor($uploadMax / 1024 ** 2), $totalLimitMb));
+@endphp
+
+<form id="product-form" method="POST" action="{{ $editing ? route('admin.products.update', $product) : route('admin.products.store') }}" enctype="multipart/form-data" class="grid lg:grid-cols-[1fr_320px] gap-6">
+    @csrf
+    @if($editing) @method('PUT') @endif
+
+    {{-- Upload size guard: server rejects oversized posts with a bare 413 before PHP runs,
+         so the whole form would be lost. Warn here instead. --}}
+    {{-- Inline styles on purpose: this markup ships without a CSS rebuild, and the
+         utility classes it would otherwise need are not in the compiled bundle. --}}
+    <div id="upload-size-alert" style="display:none; grid-column:1 / -1; border:1px solid #f2a6a6; background:#fdf2f2; color:#c02626; border-radius:10px; padding:12px 16px; font-size:14px; line-height:1.6;">
+        <i class="fa-solid fa-triangle-exclamation" style="margin-right:6px;"></i>
+        <span id="upload-size-alert-text"></span>
+    </div>
+
+    <div class="space-y-5">
+        {{-- Basic info --}}
+        <div class="bg-white rounded-xl border border-line p-5 space-y-4">
+            <div>
+                <label class="block text-sm font-medium mb-1">Product Name <span class="text-sale">*</span></label>
+                <input type="text" name="name" value="{{ old('name', $product->name) }}" required class="w-full h-11 rounded-lg border border-line px-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30">
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-1">Short Description</label>
+                <input type="text" name="short_description" value="{{ old('short_description', $product->short_description) }}" maxlength="500" class="w-full h-11 rounded-lg border border-line px-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30" placeholder="1-2 lines">
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-1">Full Description</label>
+                <textarea name="description" id="product-description" class="rich-editor w-full rounded-lg border border-line px-3 py-2 text-sm">{{ old('description', $product->description) }}</textarea>
+                <p class="text-xs text-muted mt-1">Add text formatting, images, and YouTube video links (Insert → Media).</p>
+            </div>
+            <div class="grid sm:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium mb-1">Sale Price (BDT) <span class="text-sale">*</span></label>
+                    <input type="number" step="0.01" name="price" value="{{ old('price', $product->price) }}" required class="w-full h-11 rounded-lg border border-line px-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-1">Old Price (strikethrough)</label>
+                    <input type="number" step="0.01" name="old_price" value="{{ old('old_price', $product->old_price) }}" class="w-full h-11 rounded-lg border border-line px-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-1">Stock <span class="text-sale">*</span></label>
+                    <input type="number" name="stock" value="{{ old('stock', $product->stock ?? 0) }}" required class="w-full h-11 rounded-lg border border-line px-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-1">SKU</label>
+                    <input type="text" name="sku" value="{{ old('sku', $product->sku) }}" class="w-full h-11 rounded-lg border border-line px-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30">
+                </div>
+            </div>
+        </div>
+
+        {{-- Product variants --}}
+        <div class="bg-white rounded-xl border border-line p-5"
+             x-data="variantEditor({{ \Illuminate\Support\Js::from($variantData) }})">
+            <div class="flex items-center justify-between mb-3">
+                <div>
+                    <h3 class="font-semibold text-sm">Product Variants</h3>
+                    <p class="text-xs text-muted">e.g. Size (S, M, L) or Color (Red, Blue) — customers can choose from these.</p>
+                </div>
+                <button type="button" @click="addGroup" class="btn-brand h-9 px-3 text-xs"><i class="fa-solid fa-plus"></i>New Group</button>
+            </div>
+
+            <template x-for="(group, gIdx) in groups" :key="gIdx">
+                <div class="border border-line rounded-lg p-3 mb-3 bg-canvas/40">
+                    <div class="flex gap-2 items-center mb-2">
+                        <input type="text" x-model="group.name" placeholder="Group name (Size / Color)" class="flex-1 h-9 rounded-lg border border-line px-3 text-sm bg-white">
+                        <button type="button" @click="removeGroup(gIdx)" class="w-9 h-9 grid place-items-center rounded-lg border border-line text-sale hover:bg-red-50" aria-label="Remove group"><i class="fa-solid fa-trash-can text-xs"></i></button>
+                    </div>
+                    <div class="space-y-2">
+                        <template x-for="(opt, oIdx) in group.options" :key="oIdx">
+                            <div class="flex gap-2 items-center">
+                                <input type="text" x-model="group.options[oIdx]" placeholder="Option (e.g. S / Red)" class="flex-1 h-8 rounded-lg border border-line px-2 text-xs bg-white">
+                                <button type="button" @click="removeOption(gIdx, oIdx)" class="w-8 h-8 grid place-items-center rounded-lg border border-line text-sale hover:bg-red-50" aria-label="Remove option"><i class="fa-solid fa-xmark text-xs"></i></button>
+                            </div>
+                        </template>
+                        <button type="button" @click="addOption(gIdx)" class="text-xs text-brand font-semibold hover:underline"><i class="fa-solid fa-plus"></i> Add Option</button>
+                    </div>
+                </div>
+            </template>
+
+            <p x-show="!groups.length" class="text-center text-xs text-muted py-3">No variants added.</p>
+
+            <input type="hidden" name="attributes" :value="JSON.stringify(groups)">
+        </div>
+    </div>
+
+    {{-- Right column --}}
+    <div class="space-y-5">
+        {{-- Main image --}}
+        <div class="bg-white rounded-xl border border-line p-5" x-data="mainImageUploader()">
+            <label class="block text-sm font-medium mb-2">Main Image (Cover)</label>
+            
+            <div x-show="!previewUrl" class="mb-3 relative group">
+                @if($product->main_image)
+                    <img src="{{ image_url($product->main_image, $product->name) }}" class="w-full aspect-square object-cover rounded-lg border border-line bg-canvas">
+                @endif
+            </div>
+
+            <div x-show="previewUrl" class="mb-3 relative group" style="display: none;">
+                <img :src="previewUrl" class="w-full aspect-square object-cover rounded-lg border border-line bg-canvas">
+                <button type="button" @click="removePreview" class="absolute top-1 right-1 w-7 h-7 rounded-full bg-sale text-white grid place-items-center shadow hover:bg-red-600" aria-label="Remove">
+                    <i class="fa-solid fa-xmark text-xs"></i>
+                </button>
+            </div>
+
+            <input type="file" name="main_image" x-ref="mainInput" accept="image/*" @change="handleFileSelect" class="hidden">
+            <button type="button" @click="$refs.mainInput.click()" class="btn-brand h-9 px-4 text-sm mb-2"><i class="fa-solid fa-image mr-1"></i> Choose Image</button>
+            <p class="text-xs text-muted">Max <span x-text="limitMB"></span> MB</p>
+            <p x-show="error" x-text="error" style="display: none;" class="text-xs text-sale mt-1"></p>
+
+            <label class="block text-xs text-muted mb-1 mt-2">Or Image URL</label>
+            <input type="text" name="image_url" placeholder="https://..." class="w-full h-10 rounded-lg border border-line px-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand/30">
+        </div>
+
+        {{-- Additional images (gallery — up to 8) --}}
+        <div class="bg-white rounded-xl border border-line p-5" x-data="galleryUploader()">
+            <label class="block text-sm font-medium mb-2">Additional Images (Gallery) — max 8</label>
+
+            <div class="grid grid-cols-3 gap-2 mb-3">
+                @if($editing && $product->images->isNotEmpty())
+                    @foreach($product->images as $img)
+                        <div class="relative group">
+                            <img src="{{ image_url($img->path) }}" class="w-full aspect-square object-cover rounded-lg border border-line bg-canvas">
+                            <button type="submit" form="delete-img-{{ $img->id }}" class="absolute top-1 right-1 w-7 h-7 rounded-full bg-sale text-white grid place-items-center shadow hover:bg-red-600" aria-label="Delete" onclick="return confirm('Delete this image?')">
+                                <i class="fa-solid fa-xmark text-xs"></i>
+                            </button>
+                        </div>
+                    @endforeach
+                @endif
+
+                <template x-for="(preview, index) in previews" :key="index">
+                    <div class="relative group">
+                        <img :src="preview.url" class="w-full aspect-square object-cover rounded-lg border border-line bg-canvas border border-brand/30">
+                        <button type="button" @click="removePreview(index)" class="absolute top-1 right-1 w-7 h-7 rounded-full bg-brand text-white grid place-items-center shadow hover:bg-red-600" aria-label="Remove">
+                            <i class="fa-solid fa-xmark text-xs"></i>
+                        </button>
+                    </div>
+                </template>
+            </div>
+
+            <input type="file" name="images[]" x-ref="galleryInput" multiple class="hidden">
+            <button type="button" @click="$refs.dummyGallery.click()" class="btn-brand h-9 px-4 text-sm mb-2"><i class="fa-solid fa-images mr-1"></i> Add Multiple Images</button>
+            <input type="file" accept="image/*" x-ref="dummyGallery" multiple @change="handleFileSelect" class="hidden">
+            <p class="text-xs text-muted mt-1">You can select multiple images at once. Each max <span x-text="limitMB"></span> MB.</p>
+            <p x-show="error" x-text="error" style="display: none;" class="text-xs text-sale mt-1"></p>
+        </div>
+
+        {{-- Category + flags --}}
+        <div class="bg-white rounded-xl border border-line p-5 space-y-3">
+            <div>
+                <label class="block text-sm font-medium mb-1">Category</label>
+                <select name="category_id" class="w-full h-11 rounded-lg border border-line px-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand/30">
+                    <option value="">— Select —</option>
+                    @foreach($categories as $cat)
+                        <option value="{{ $cat->id }}" @selected(old('category_id', $product->category_id) == $cat->id)>{{ $cat->name }}</option>
+                    @endforeach
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-1">Brand</label>
+                <select name="brand_id" class="w-full h-11 rounded-lg border border-line px-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand/30">
+                    <option value="">— Select Brand —</option>
+                    @foreach($brands as $brand)
+                        <option value="{{ $brand->id }}" @selected(old('brand_id', $product->brand_id) == $brand->id)>{{ $brand->name }}</option>
+                    @endforeach
+                </select>
+                @if($brands->isEmpty())
+                    <p class="text-xs text-muted mt-1">No brands yet — add them in <a href="{{ route('admin.brands.index') }}" class="text-brand font-semibold hover:underline">Brands</a>.</p>
+                @endif
+            </div>
+            <p class="text-xs font-semibold text-muted uppercase tracking-wide pt-1">Show on home in</p>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="is_flash_sale" value="1" @checked(old('is_flash_sale', $product->is_flash_sale)) class="accent-brand"><span class="flex items-center gap-1">⚡ Flash Sale</span></label>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="is_featured" value="1" @checked(old('is_featured', $product->is_featured)) class="accent-brand"><span class="flex items-center gap-1">⭐ Featured</span></label>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="is_best_seller" value="1" @checked(old('is_best_seller', $product->is_best_seller)) class="accent-brand"><span class="flex items-center gap-1">🔥 Best Selling</span></label>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="is_new_arrival" value="1" @checked(old('is_new_arrival', $product->is_new_arrival)) class="accent-brand"><span class="flex items-center gap-1">🆕 New Arrival</span></label>
+            <label class="flex items-center gap-2 text-sm border-t border-line pt-3 mt-1"><input type="checkbox" name="is_active" value="1" @checked(old('is_active', $editing ? $product->is_active : true)) class="accent-brand">Active (visible on site)</label>
+        </div>
+
+        <p class="text-xs text-muted">This server allows at most <strong>{{ $totalLimitMb }} MB</strong> per upload.</p>
+
+        <div class="flex gap-2">
+            <button type="submit" class="btn-brand h-11 flex-1">{{ $editing ? 'Update' : 'Save' }}</button>
+            <a href="{{ route('admin.products.index') }}" class="h-11 px-4 rounded-lg border border-line bg-white inline-flex items-center text-sm">Cancel</a>
+        </div>
+    </div>
+</form>
+
+@if($editing && $product->images->isNotEmpty())
+    @foreach($product->images as $img)
+        <form id="delete-img-{{ $img->id }}" method="POST" action="{{ route('admin.products.images.destroy', [$product, $img]) }}" class="hidden">
+            @csrf @method('DELETE')
+        </form>
+    @endforeach
+@endif
+
+@push('scripts')
+<script src="https://cdn.jsdelivr.net/npm/tinymce@6/tinymce.min.js"></script>
+<script>
+    // ===== Rich text editor (TinyMCE, self-hosted via jsDelivr — no API key) =====
+    tinymce.init({
+        selector: 'textarea.rich-editor',
+        license_key: 'gpl',
+        height: 420,
+        menubar: false,
+        branding: false,
+        promotion: false,
+        plugins: 'lists link image media table code autolink wordcount',
+        toolbar: 'undo redo | blocks | bold italic underline strikethrough | forecolor backcolor | alignleft aligncenter alignright alignjustify | bullist numlist outdent indent | link image media table | removeformat | code',
+        media_live_embeds: true,
+        media_url_resolver: function (data, resolve) {
+            // Handle YouTube embeds explicitly so any link (share, watch?v=, youtu.be) works.
+            const yt = data.url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_\-]{6,})/);
+            if (yt) {
+                const id = yt[1];
+                const html = `<iframe width="640" height="360" src="https://www.youtube.com/embed/${id}" frameborder="0" allowfullscreen allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"></iframe>`;
+                resolve({ html });
+                return;
+            }
+            resolve({ html: '' });
+        },
+        images_upload_url: '{{ route('admin.editor.image') }}',
+        images_upload_handler: function (blobInfo, progress) {
+            return new Promise(function (resolve, reject) {
+                const fd = new FormData();
+                fd.append('file', blobInfo.blob(), blobInfo.filename());
+                fetch('{{ route('admin.editor.image') }}', {
+                    method: 'POST',
+                    headers: { 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content, 'Accept': 'application/json' },
+                    body: fd,
+                }).then(r => r.ok ? r.json() : Promise.reject('Upload failed'))
+                  .then(j => resolve(j.location))
+                  .catch(err => reject(String(err)));
+            });
+        },
+        content_style: 'body { font-family: "Plus Jakarta Sans","Hind Siliguri",sans-serif; font-size: 14px; }',
+    });
+
+    // ===== Variant editor (Alpine) =====
+    function variantEditor(existingJson) {
+        let parsed = [];
+        try {
+            const decoded = typeof existingJson === 'string' ? JSON.parse(existingJson) : existingJson;
+            if (Array.isArray(decoded)) parsed = decoded;
+        } catch (e) { parsed = []; }
+        // Normalize each group to {name, options[]}
+        parsed = parsed.filter(g => g && typeof g === 'object').map(g => ({
+            name: g.name || '',
+            options: Array.isArray(g.options) ? g.options : [],
+        }));
+
+        return {
+            groups: parsed,
+            addGroup() { this.groups.push({ name: '', options: [''] }); },
+            removeGroup(i) { this.groups.splice(i, 1); },
+            addOption(i) { this.groups[i].options.push(''); },
+            removeOption(gi, oi) { this.groups[gi].options.splice(oi, 1); },
+        };
+    }
+
+    // ===== Upload limits =====
+    // Values come from this server's live php.ini (see the @php block at the top of the
+    // file), capped by the ProductController rules. Nothing to hand-edit here: raise
+    // post_max_size / upload_max_filesize and these follow automatically.
+    const UPLOAD = {
+        MAIN_MB: {{ $mainLimitMb }},
+        GALLERY_MB: {{ $galleryLimitMb }},
+        GALLERY_MAX: 8,
+        TOTAL_MB: {{ $totalLimitMb }},
+    };
+
+    const mb = bytes => bytes / 1024 / 1024;
+    const fmtMB = bytes => mb(bytes).toFixed(1);
+
+    // Chrome only holds a *reference* to the picked file and re-reads it from disk when
+    // the form is finally submitted. On Android the gallery/camera app often rewrites or
+    // clears that file in the meantime, and the upload dies with ERR_UPLOAD_FILE_CHANGED
+    // before the request ever leaves the browser. Copying the bytes into memory at pick
+    // time gives the form a file that no longer depends on the on-disk original.
+    // (Product photos are a few MB, so holding them in memory is cheap.)
+    const detachFile = async (file) => {
+        try {
+            const buffer = await file.arrayBuffer();
+            return new File([buffer], file.name, { type: file.type, lastModified: Date.now() });
+        } catch (e) {
+            return file;   // keep the original rather than losing the upload entirely
+        }
+    };
+
+    const setInputFiles = (input, files) => {
+        const dt = new DataTransfer();
+        files.forEach(f => dt.items.add(f));
+        input.files = dt.files;
+    };
+
+    const readAsDataURL = file => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = e => resolve(e.target.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+
+    // ===== Image Uploaders (Alpine) =====
+    function mainImageUploader() {
+        return {
+            previewUrl: null,
+            error: null,
+            limitMB: UPLOAD.MAIN_MB,
+            async handleFileSelect(event) {
+                const picked = event.target.files[0];
+                if (!picked) return;
+
+                this.error = null;
+
+                if (mb(picked.size) > UPLOAD.MAIN_MB) {
+                    this.error = `Image is ${fmtMB(picked.size)} MB — max ${UPLOAD.MAIN_MB} MB allowed. Please compress it and try again.`;
+                    event.target.value = '';
+                    return;
+                }
+
+                const file = await detachFile(picked);
+                setInputFiles(this.$refs.mainInput, [file]);
+
+                this.previewUrl = await readAsDataURL(file);
+            },
+            removePreview() {
+                this.previewUrl = null;
+                this.error = null;
+                this.$refs.mainInput.value = '';
+            }
+        };
+    }
+
+    function galleryUploader() {
+        return {
+            previews: [],
+            error: null,
+            limitMB: UPLOAD.GALLERY_MB,
+            existingCount: {{ $editing ? $product->images->count() : 0 }},
+            async handleFileSelect(event) {
+                const selected = Array.from(event.target.files);
+                event.target.value = '';
+
+                const rejected = [];
+                const accepted = [];
+
+                selected.forEach(file => {
+                    if (mb(file.size) > UPLOAD.GALLERY_MB) {
+                        rejected.push(`${file.name} (${fmtMB(file.size)} MB)`);
+                    } else {
+                        accepted.push(file);
+                    }
+                });
+
+                // Gallery slots already taken by saved images count against the limit.
+                const room = UPLOAD.GALLERY_MAX - this.existingCount - this.previews.length;
+                const overflow = accepted.splice(Math.max(room, 0));
+
+                this.error = null;
+                const notes = [];
+                if (rejected.length) {
+                    notes.push(`Skipped (larger than ${UPLOAD.GALLERY_MB} MB): ${rejected.join(', ')}`);
+                }
+                if (overflow.length) {
+                    notes.push(`Max ${UPLOAD.GALLERY_MAX} images allowed, so ${overflow.length} were skipped.`);
+                }
+                if (notes.length) {
+                    this.error = notes.join(' ');
+                }
+
+                for (const picked of accepted) {
+                    const file = await detachFile(picked);
+                    this.previews.push({ file: file, url: await readAsDataURL(file) });
+                    this.syncInput();
+                }
+            },
+            removePreview(index) {
+                this.previews.splice(index, 1);
+                this.error = null;
+                this.syncInput();
+            },
+            syncInput() {
+                const dt = new DataTransfer();
+                this.previews.forEach(p => dt.items.add(p.file));
+                this.$refs.galleryInput.files = dt.files;
+            }
+        };
+    }
+
+    // ===== Total payload guard =====
+    // Per-file checks above can still add up past the server limit, so block the submit
+    // rather than let the browser post something that comes back as a 413.
+    document.getElementById('product-form')?.addEventListener('submit', function (event) {
+        const alertBox = document.getElementById('upload-size-alert');
+        const alertText = document.getElementById('upload-size-alert-text');
+
+        let total = 0;
+        this.querySelectorAll('input[type="file"]').forEach(input => {
+            Array.from(input.files || []).forEach(file => { total += file.size; });
+        });
+
+        if (mb(total) <= UPLOAD.TOTAL_MB) {
+            alertBox.style.display = 'none';
+            return;
+        }
+
+        event.preventDefault();
+        alertText.textContent =
+            `All images total ${fmtMB(total)} MB — max ${UPLOAD.TOTAL_MB} MB per upload. ` +
+            `Remove some images, or compress them (under 300 KB) and try again.`;
+        alertBox.style.display = 'block';
+        alertBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+</script>
+@endpush

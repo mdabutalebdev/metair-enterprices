@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#17346b"/>
+  <!-- Bold "M" (METAIR, navy wordmark) drawn as a path so it needs no font -->
+  <path d="M14,47 L14,17 L23,17 L32,33 L41,17 L50,17 L50,47 L42,47 L42,30 L35,42 L29,42 L22,30 L22,47 Z" fill="#ffffff"/>
+  <!-- Orange bar = the ENTERPRISE accent -->
+  <rect x="14" y="51" width="36" height="4.5" rx="2.25" fill="#f4661a"/>
+</svg>
