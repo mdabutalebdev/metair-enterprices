@@ -1,0 +1,82 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Category extends Model
+{
+    protected $fillable = [
+        'parent_id',
+        'name_en',
+        'name_bn',
+        'slug',
+        'image',
+        'promo_image',
+        'icon',
+        'sort_order',
+        'show_in_nav',
+        'is_active',
+        'show_on_home',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'is_active' => 'boolean',
+            'show_in_nav' => 'boolean',
+            'show_on_home' => 'boolean',
+        ];
+    }
+
+    /**
+     * Locale-aware display name. The `name` column was split into
+     * `name_en` / `name_bn`; this keeps every `$category->name` reference
+     * (nav, footer, breadcrumbs, admin lists) working, and falls back to
+     * the other language when one side is empty.
+     */
+    public function getNameAttribute(): string
+    {
+        $bn = $this->attributes['name_bn'] ?? null;
+        $en = $this->attributes['name_en'] ?? null;
+
+        return app()->getLocale() === 'bn'
+            ? (string) ($bn ?: $en)
+            : (string) ($en ?: $bn);
+    }
+
+    public function parent()
+    {
+        return $this->belongsTo(Category::class, 'parent_id');
+    }
+
+    public function children()
+    {
+        return $this->hasMany(Category::class, 'parent_id')->orderBy('sort_order');
+    }
+
+    public function products()
+    {
+        return $this->hasMany(Product::class);
+    }
+
+    public function banners()
+    {
+        return $this->hasMany(CategoryBanner::class)->orderBy('sort_order');
+    }
+
+    public function scopeTopLevel($query)
+    {
+        return $query->whereNull('parent_id');
+    }
+
+    public function scopeActive($query)
+    {
+        return $query->where('is_active', true);
+    }
+
+    public function scopeInNav($query)
+    {
+        return $query->where('show_in_nav', true);
+    }
+}
